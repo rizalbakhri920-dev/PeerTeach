@@ -24,6 +24,19 @@ db.exec(`
     price_offline_exam INTEGER,
     achievements TEXT,
     availability TEXT,
+    status TEXT DEFAULT 'pending',
+    user_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    role TEXT DEFAULT 'student',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
@@ -112,6 +125,39 @@ async function startServer() {
   app.use(express.json());
 
   // API Routes
+  app.post("/api/register", (req, res) => {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    try {
+      const stmt = db.prepare("INSERT INTO users (name, email, password) VALUES (?, ?, ?)");
+      const result = stmt.run(name, email, password);
+      res.json({ success: true, id: result.lastInsertRowid });
+    } catch (error: any) {
+      if (error.message.includes("UNIQUE constraint failed")) {
+        return res.status(400).json({ error: "Email already exists" });
+      }
+      console.error("Database error:", error);
+      res.status(500).json({ error: "Failed to register user" });
+    }
+  });
+
+  app.post("/api/login", (req, res) => {
+    const { email, password } = req.body;
+    try {
+      const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password);
+      if (user) {
+        res.json({ success: true, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+      } else {
+        res.status(401).json({ error: "Invalid email or password" });
+      }
+    } catch (error) {
+      console.error("Database error:", error);
+      res.status(500).json({ error: "Failed to login" });
+    }
+  });
+
   app.post("/api/register-tutor", async (req, res) => {
     const { 
       name, 
@@ -124,7 +170,8 @@ async function startServer() {
       price_offline_remedial,
       price_offline_exam,
       achievements,
-      availability
+      availability,
+      user_id
     } = req.body;
     
     if (!name || !tutorClass || !whatsapp || !subject) {
@@ -138,9 +185,9 @@ async function startServer() {
           name, class, whatsapp, subject, subjects_taught, 
           price_online_remedial, price_online_exam, 
           price_offline_remedial, price_offline_exam, 
-          achievements, availability
+          achievements, availability, user_id, status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
       `);
       stmt.run(
         name, 
@@ -153,7 +200,8 @@ async function startServer() {
         price_offline_remedial,
         price_offline_exam,
         achievements,
-        availability
+        availability,
+        user_id || null
       );
 
       // Also append to Google Sheets in background
@@ -163,6 +211,27 @@ async function startServer() {
     } catch (error) {
       console.error("Database error:", error);
       res.status(500).json({ error: "Failed to register tutor" });
+    }
+  });
+
+  app.get("/api/tutors", (req, res) => {
+    try {
+      const rows = db.prepare("SELECT * FROM tutor_registrations WHERE status = 'approved' ORDER BY created_at DESC").all();
+      res.json(rows);
+    } catch (error) {
+      console.error("Database error:", error);
+      res.status(500).json({ error: "Failed to fetch tutors" });
+    }
+  });
+
+  app.post("/api/tutor-registrations/:id/approve", (req, res) => {
+    const { id } = req.params;
+    try {
+      db.prepare("UPDATE tutor_registrations SET status = 'approved' WHERE id = ?").run(id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Database error:", error);
+      res.status(500).json({ error: "Failed to approve registration" });
     }
   });
 
@@ -179,7 +248,7 @@ async function startServer() {
   app.get("/api/community-messages/:communityName", (req, res) => {
     const { communityName } = req.params;
     try {
-      const rows = db.prepare("SELECT * FROM community_messages WHERE community_name = ? ORDER BY timestamp ASC").all();
+      const rows = db.prepare("SELECT * FROM community_messages WHERE community_name = ? ORDER BY timestamp ASC").all(communityName);
       res.json(rows);
     } catch (error) {
       console.error("Database error:", error);

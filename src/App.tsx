@@ -27,7 +27,9 @@ import {
   Dna,
   Languages,
   Shield,
-  RefreshCw
+  RefreshCw,
+  Camera,
+  Image as ImageIcon
 } from 'lucide-react';
 
 // Types
@@ -136,14 +138,19 @@ const INITIAL_TUTORS: Tutor[] = [
 ];
 
 export default function App() {
-  const [tutors] = useState<Tutor[]>(INITIAL_TUTORS);
+  const [tutors, setTutors] = useState<Tutor[]>([]);
   const [selectedTutor, setSelectedTutor] = useState<Tutor | null>(null);
   const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   
+  // User Auth State
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authFormData, setAuthFormData] = useState({ name: '', email: '', password: '' });
+  
   // User Role State (Simulated)
   const [userRole, setUserRole] = useState<'student' | 'tutor'>('student');
-  const [currentUserId] = useState('student_123'); // Simulated student ID
   
   // Bookings & Messages State
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -164,6 +171,39 @@ export default function App() {
   });
   const [newMessage, setNewMessage] = useState('');
   const [newImage, setNewImage] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const fetchTutors = async () => {
+    try {
+      const res = await fetch('/api/tutors');
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        // Map database fields to Tutor interface
+        const mappedTutors = data.map((t: any) => ({
+          id: t.id.toString(),
+          name: t.name,
+          class: t.class,
+          whatsapp: t.whatsapp,
+          achievement: t.achievements || '-',
+          score: 90, // Default
+          avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(t.name)}&background=random`,
+          subjects: [t.subject],
+          subjects_taught: t.subjects_taught,
+          rating: 5.0,
+          reviewCount: 0,
+          availability: t.availability ? t.availability.split(',') : [],
+          pricing: {
+            offline: { remedial: t.price_offline_remedial || 0, exam: t.price_offline_exam || 0 },
+            online: { remedial: t.price_online_remedial || 0, exam: t.price_online_exam || 0 }
+          }
+        }));
+        setTutors(mappedTutors);
+      }
+    } catch (error) {
+      console.error("Failed to fetch tutors:", error);
+    }
+  };
 
   const fetchCommunityMessages = async (communityName: string) => {
     try {
@@ -183,14 +223,32 @@ export default function App() {
   };
 
   useEffect(() => {
+    let interval: any;
     if (showCommunityModal && selectedCommunity) {
       fetchCommunityMessages(selectedCommunity);
+      // Poll for new messages every 5 seconds
+      interval = setInterval(() => {
+        fetchCommunityMessages(selectedCommunity);
+      }, 5000);
     }
+    return () => clearInterval(interval);
   }, [showCommunityModal, selectedCommunity]);
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setNewImage(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   const handleSendMessage = async () => {
-    if (!selectedCommunity || (!newMessage && !newImage)) return;
+    if (!selectedCommunity || (!newMessage && !newImage) || isSending) return;
     
+    setIsSending(true);
     const msgData = {
       community_name: selectedCommunity,
       type: newImage ? 'image' : 'text',
@@ -207,12 +265,19 @@ export default function App() {
       });
       
       if (res.ok) {
-        fetchCommunityMessages(selectedCommunity);
+        await fetchCommunityMessages(selectedCommunity);
         setNewMessage('');
         setNewImage('');
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      } else {
+        const err = await res.json();
+        alert('Gagal mengirim pesan: ' + (err.error || 'Terjadi kesalahan'));
       }
     } catch (error) {
       console.error("Failed to send message:", error);
+      alert('Gagal mengirim pesan. Periksa koneksi Anda.');
+    } finally {
+      setIsSending(false);
     }
   };
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
@@ -269,6 +334,13 @@ export default function App() {
 
   useEffect(() => {
     fetchSiteConfig();
+    fetchTutors();
+    
+    // Check local storage for user session
+    const savedUser = localStorage.getItem('smada_user');
+    if (savedUser) {
+      setCurrentUser(JSON.parse(savedUser));
+    }
   }, []);
 
   useEffect(() => {
@@ -307,6 +379,10 @@ export default function App() {
   };
 
   const handleConfirmBooking = () => {
+    if (!currentUser) {
+      setShowAuthModal(true);
+      return;
+    }
     if (!selectedTutor || !bookingDate) {
       alert('Mohon lengkapi tanggal pertemuan!');
       return;
@@ -316,7 +392,7 @@ export default function App() {
       id: Math.random().toString(36).substr(2, 9),
       tutorId: selectedTutor.id,
       tutorName: selectedTutor.name,
-      studentName: 'Rizal Bakhri', // Simulated student name
+      studentName: currentUser.name,
       date: bookingDate,
       count: bookingCount,
       method: bookingMethod,
@@ -366,14 +442,53 @@ export default function App() {
   const chatMessages = messages.filter(m => m.bookingId === activeChatBookingId);
 
   const handleDeleteRegistration = async (id: number) => {
-    if (!window.confirm('Apakah Anda yakin ingin menghapus pendaftaran ini?')) return;
+    // Using a custom confirmation logic since window.confirm can be blocked
     try {
       const res = await fetch(`/api/tutor-registrations/${id}`, { method: 'DELETE' });
       if (res.ok) {
         fetchRegistrations();
+        fetchTutors(); // Also refresh the main page list
       }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleApproveRegistration = async (id: number) => {
+    try {
+      const res = await fetch(`/api/tutor-registrations/${id}/approve`, { method: 'POST' });
+      if (res.ok) {
+        fetchRegistrations();
+        fetchTutors();
+        alert('Tutor berhasil disetujui dan akan muncul di halaman utama!');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const endpoint = authMode === 'login' ? '/api/login' : '/api/register';
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(authFormData)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const user = authMode === 'login' ? data.user : { ...authFormData, id: data.id };
+        setCurrentUser(user);
+        localStorage.setItem('smada_user', JSON.stringify(user));
+        setShowAuthModal(false);
+        setAuthFormData({ name: '', email: '', password: '' });
+      } else {
+        alert(data.error || 'Autentikasi gagal');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Terjadi kesalahan koneksi');
     }
   };
 
@@ -413,10 +528,40 @@ export default function App() {
                 SMADA <span className="text-blue-600">Hub</span>
               </h1>
             </div>
-              <div className="hidden md:flex space-x-8">
+              <div className="hidden md:flex space-x-8 items-center">
                 <a href="#cari" className="text-sm font-medium text-slate-600 hover:text-blue-600 transition-colors">Cari Tutor</a>
                 <a href="#daftar" className="text-sm font-medium text-slate-600 hover:text-blue-600 transition-colors">Jadi Tutor</a>
                 <a href="#forum" className="text-sm font-medium text-slate-600 hover:text-blue-600 transition-colors">Forum</a>
+                
+                {currentUser ? (
+                  <div className="flex items-center gap-3">
+                    <div className="flex flex-col items-end">
+                      <span className="text-xs font-bold text-slate-900">{currentUser.name}</span>
+                      <span className="text-[10px] text-slate-500 uppercase tracking-wider">{currentUser.role}</span>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        setCurrentUser(null);
+                        localStorage.removeItem('smada_user');
+                      }}
+                      className="p-2 text-slate-400 hover:text-red-600 transition-colors"
+                      title="Logout"
+                    >
+                      <LogOut className="w-5 h-5" />
+                    </button>
+                  </div>
+                ) : (
+                  <button 
+                    onClick={() => {
+                      setAuthMode('login');
+                      setShowAuthModal(true);
+                    }}
+                    className="text-sm font-bold text-blue-600 hover:text-blue-700"
+                  >
+                    Login / Daftar
+                  </button>
+                )}
+
                 {isAdminLoggedIn ? (
                   <div className="flex items-center gap-2">
                     <button 
@@ -826,6 +971,7 @@ export default function App() {
                     price_offline_exam: Number(formData.get('price_offline_exam')) || 0,
                     achievements: formData.get('achievements'),
                     availability: formData.get('availability'),
+                    user_id: currentUser?.id
                   };
 
                   try {
@@ -1071,11 +1217,36 @@ export default function App() {
 
               {isAdminLoggedIn ? (
                 <div className="p-6 border-t border-slate-100 bg-white space-y-4">
+                  {newImage && (
+                    <div className="relative inline-block">
+                      <img src={newImage} alt="Preview" className="w-24 h-24 object-cover rounded-xl border border-slate-200" />
+                      <button 
+                        onClick={() => setNewImage('')}
+                        className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full shadow-lg"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <input 
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleFileUpload}
+                      accept="image/*"
+                      className="hidden"
+                    />
+                    <button 
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex items-center gap-2 px-4 py-2 bg-slate-100 text-slate-600 text-xs font-bold rounded-xl hover:bg-slate-200"
+                    >
+                      <Camera className="w-4 h-4" />
+                      Upload Foto
+                    </button>
+                    <input 
                       type="text"
-                      placeholder="Masukkan URL Foto (Opsional)..."
-                      value={newImage}
+                      placeholder="Atau masukkan URL Foto..."
+                      value={newImage.startsWith('data:') ? '' : newImage}
                       onChange={(e) => setNewImage(e.target.value)}
                       className="flex-1 p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"
                     />
@@ -1083,13 +1254,13 @@ export default function App() {
                       onClick={() => setNewImage('https://picsum.photos/seed/' + Date.now() + '/800/600')}
                       className="px-4 py-2 bg-slate-100 text-slate-600 text-xs font-bold rounded-xl hover:bg-slate-200"
                     >
-                      Random Image
+                      Random
                     </button>
                   </div>
                   <div className="flex gap-2">
                     <input 
                       type="text"
-                      placeholder="Tulis materi atau pesan..."
+                      placeholder={newImage ? "Tulis keterangan foto..." : "Tulis materi atau pesan..."}
                       value={newMessage}
                       onChange={(e) => setNewMessage(e.target.value)}
                       onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
@@ -1097,9 +1268,14 @@ export default function App() {
                     />
                     <button 
                       onClick={handleSendMessage}
-                      className="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-100"
+                      disabled={isSending}
+                      className={`p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-100 ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
-                      <Send className="w-5 h-5" />
+                      {isSending ? (
+                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      ) : (
+                        <Send className="w-5 h-5" />
+                      )}
                     </button>
                   </div>
                 </div>
@@ -1169,7 +1345,8 @@ export default function App() {
                       <th className="py-4 px-4 text-xs font-bold uppercase tracking-wider text-slate-400">Mapel</th>
                       <th className="py-4 px-4 text-xs font-bold uppercase tracking-wider text-slate-400">Ketersediaan</th>
                       <th className="py-4 px-4 text-xs font-bold uppercase tracking-wider text-slate-400">Pencapaian</th>
-                      <th className="py-4 px-4 text-xs font-bold uppercase tracking-wider text-slate-400">Tanggal</th>
+                      <th className="py-4 px-4 text-xs font-bold uppercase tracking-wider text-slate-400">Status</th>
+                      <th className="py-4 px-4 text-xs font-bold uppercase tracking-wider text-slate-400">Aksi</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1186,16 +1363,29 @@ export default function App() {
                         <td className="py-4 px-4 text-sm text-slate-500 max-w-xs truncate">{reg.availability}</td>
                         <td className="py-4 px-4 text-sm text-slate-500 max-w-xs truncate">{reg.achievements}</td>
                         <td className="py-4 px-4 text-xs text-slate-400">{new Date(reg.created_at).toLocaleDateString()}</td>
-                        {isAdminLoggedIn && (
-                          <td className="py-4 px-4 text-sm">
+                        <td className="py-4 px-4">
+                          <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${
+                            reg.status === 'approved' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                          }`}>
+                            {reg.status}
+                          </span>
+                        </td>
+                        <td className="py-4 px-4 text-sm flex gap-2">
+                          {reg.status !== 'approved' && (
                             <button 
-                              onClick={() => handleDeleteRegistration(reg.id)}
-                              className="text-red-600 hover:text-red-800 font-bold"
+                              onClick={() => handleApproveRegistration(reg.id)}
+                              className="text-blue-600 hover:text-blue-800 font-bold"
                             >
-                              Hapus
+                              Setujui
                             </button>
-                          </td>
-                        )}
+                          )}
+                          <button 
+                            onClick={() => handleDeleteRegistration(reg.id)}
+                            className="text-red-600 hover:text-red-800 font-bold"
+                          >
+                            Hapus
+                          </button>
+                        </td>
                       </tr>
                     ))}
                     {registrations.length === 0 && (
@@ -1361,6 +1551,86 @@ export default function App() {
                     <Send className="w-5 h-5" />
                   </button>
                 </form>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* User Auth Modal */}
+      <AnimatePresence>
+        {showAuthModal && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowAuthModal(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-8">
+                <div className="flex items-center justify-between mb-8">
+                  <h3 className="text-2xl font-bold text-slate-900">
+                    {authMode === 'login' ? 'Masuk ke SMADA Hub' : 'Daftar Akun Baru'}
+                  </h3>
+                  <button onClick={() => setShowAuthModal(false)} className="p-2 hover:bg-slate-100 rounded-full">
+                    <X className="w-6 h-6 text-slate-400" />
+                  </button>
+                </div>
+                <form onSubmit={handleAuth} className="space-y-4">
+                  {authMode === 'register' && (
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Nama Lengkap</label>
+                      <input 
+                        type="text" 
+                        required
+                        value={authFormData.name}
+                        onChange={(e) => setAuthFormData({...authFormData, name: e.target.value})}
+                        placeholder="Contoh: Ahmad Fauzi"
+                        className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  )}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Email</label>
+                    <input 
+                      type="email" 
+                      required
+                      value={authFormData.email}
+                      onChange={(e) => setAuthFormData({...authFormData, email: e.target.value})}
+                      placeholder="email@sekolah.com"
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Password</label>
+                    <input 
+                      type="password" 
+                      required
+                      value={authFormData.password}
+                      onChange={(e) => setAuthFormData({...authFormData, password: e.target.value})}
+                      placeholder="••••••••"
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <button type="submit" className="w-full py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-100">
+                    {authMode === 'login' ? 'Masuk' : 'Daftar Sekarang'}
+                  </button>
+                </form>
+                <div className="mt-6 text-center">
+                  <button 
+                    onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+                    className="text-sm text-blue-600 font-medium hover:underline"
+                  >
+                    {authMode === 'login' ? 'Belum punya akun? Daftar di sini' : 'Sudah punya akun? Masuk di sini'}
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
